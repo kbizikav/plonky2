@@ -12,22 +12,25 @@ use plonky2::plonk::circuit_data::CircuitConfig;
 use plonky2::plonk::config::GenericConfig;
 use plonky2::util::{log2_ceil, log2_strict, transpose};
 
+use crate::config::StarkConfig;
 use crate::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer};
-use crate::evaluation_frame::StarkEvaluationFrame;
 use crate::stark::Stark;
+use crate::vars::{StarkEvaluationTargets, StarkEvaluationVars};
 
 const WITNESS_SIZE: usize = 1 << 5;
 
 /// Tests that the constraints imposed by the given STARK are low-degree by applying them to random
 /// low-degree witness polynomials.
 pub fn test_stark_low_degree<F: RichField + Extendable<D>, S: Stark<F, D>, const D: usize>(
+    config: &StarkConfig,
     stark: S,
 ) -> Result<()> {
     let rate_bits = log2_ceil(stark.constraint_degree() + 1);
 
-    let trace_ldes = random_low_degree_matrix::<F>(S::COLUMNS, rate_bits);
+    let trace_ldes = random_low_degree_matrix::<F>(config.num_columns, rate_bits);
+    let fixed_values_ldes = random_low_degree_matrix::<F>(config.num_fixed_columns, rate_bits);
     let size = trace_ldes.len();
-    let public_inputs = F::rand_vec(S::PUBLIC_INPUTS);
+    let public_inputs = F::rand_vec(config.num_public_inputs);
 
     let lagrange_first = PolynomialValues::selector(WITNESS_SIZE, 0).lde(rate_bits);
     let lagrange_last = PolynomialValues::selector(WITNESS_SIZE, WITNESS_SIZE - 1).lde(rate_bits);
@@ -38,11 +41,12 @@ pub fn test_stark_low_degree<F: RichField + Extendable<D>, S: Stark<F, D>, const
     let alpha = F::rand();
     let constraint_evals = (0..size)
         .map(|i| {
-            let vars = S::EvaluationFrame::from_values(
-                &trace_ldes[i],
-                &trace_ldes[(i + (1 << rate_bits)) % size],
-                &public_inputs,
-            );
+            let vars = StarkEvaluationVars {
+                local_values: &trace_ldes[i],
+                next_values: &trace_ldes[(i + (1 << rate_bits)) % size],
+                fixed_values: &fixed_values_ldes[i],
+                public_inputs: &public_inputs,
+            };
 
             let mut consumer = ConstraintConsumer::<F>::new(
                 vec![alpha],
@@ -50,7 +54,7 @@ pub fn test_stark_low_degree<F: RichField + Extendable<D>, S: Stark<F, D>, const
                 lagrange_first.values[i],
                 lagrange_last.values[i],
             );
-            stark.eval_packed_base(&vars, &mut consumer);
+            stark.eval_packed_base(vars, &mut consumer);
             consumer.accumulators()[0]
         })
         .collect::<Vec<_>>();
@@ -77,14 +81,16 @@ pub fn test_stark_circuit_constraints<
     S: Stark<F, D>,
     const D: usize,
 >(
+    config: &StarkConfig,
     stark: S,
 ) -> Result<()> {
     // Compute native constraint evaluation on random values.
-    let vars = S::EvaluationFrame::from_values(
-        &F::Extension::rand_vec(S::COLUMNS),
-        &F::Extension::rand_vec(S::COLUMNS),
-        &F::Extension::rand_vec(S::PUBLIC_INPUTS),
-    );
+    let vars = StarkEvaluationVars {
+        local_values: &F::Extension::rand_vec(config.num_columns),
+        next_values: &F::Extension::rand_vec(config.num_columns),
+        fixed_values: &F::Extension::rand_vec(config.num_fixed_columns),
+        public_inputs: &F::Extension::rand_vec(config.num_public_inputs),
+    };
     let alphas = F::rand_vec(1);
     let z_last = F::Extension::rand();
     let lagrange_first = F::Extension::rand();
@@ -99,19 +105,22 @@ pub fn test_stark_circuit_constraints<
         lagrange_first,
         lagrange_last,
     );
-    stark.eval_ext(&vars, &mut consumer);
+    stark.eval_ext(vars, &mut consumer);
     let native_eval = consumer.accumulators()[0];
+
     // Compute circuit constraint evaluation on same random values.
     let circuit_config = CircuitConfig::standard_recursion_config();
     let mut builder = CircuitBuilder::<F, D>::new(circuit_config);
     let mut pw = PartialWitness::<F>::new();
 
-    let locals_t = builder.add_virtual_extension_targets(S::COLUMNS);
-    pw.set_extension_targets(&locals_t, vars.get_local_values());
-    let nexts_t = builder.add_virtual_extension_targets(S::COLUMNS);
-    pw.set_extension_targets(&nexts_t, vars.get_next_values());
-    let pis_t = builder.add_virtual_extension_targets(S::PUBLIC_INPUTS);
-    pw.set_extension_targets(&pis_t, vars.get_public_inputs());
+    let locals_t = builder.add_virtual_extension_targets(config.num_columns);
+    pw.set_extension_targets(&locals_t, vars.local_values);
+    let nexts_t = builder.add_virtual_extension_targets(config.num_columns);
+    pw.set_extension_targets(&nexts_t, vars.next_values);
+    let fixed_values_t = builder.add_virtual_extension_targets(config.num_fixed_columns);
+    pw.set_extension_targets(&fixed_values_t, vars.fixed_values);
+    let pis_t = builder.add_virtual_extension_targets(config.num_public_inputs);
+    pw.set_extension_targets(&pis_t, vars.public_inputs);
     let alphas_t = builder.add_virtual_targets(1);
     pw.set_target(alphas_t[0], alphas[0]);
     let z_last_t = builder.add_virtual_extension_target();
@@ -121,7 +130,12 @@ pub fn test_stark_circuit_constraints<
     let lagrange_last_t = builder.add_virtual_extension_target();
     pw.set_extension_target(lagrange_last_t, lagrange_last);
 
-    let vars = S::EvaluationFrameTarget::from_values(&locals_t, &nexts_t, &pis_t);
+    let vars = StarkEvaluationTargets::<D> {
+        local_values: &locals_t,
+        next_values: &nexts_t,
+        fixed_values: &fixed_values_t,
+        public_inputs: &pis_t,
+    };
     let mut consumer = RecursiveConstraintConsumer::<F, D>::new(
         builder.zero_extension(),
         alphas_t,
@@ -129,7 +143,7 @@ pub fn test_stark_circuit_constraints<
         lagrange_first_t,
         lagrange_last_t,
     );
-    stark.eval_ext_circuit(&mut builder, &vars, &mut consumer);
+    stark.eval_ext_circuit(&mut builder, vars, &mut consumer);
     let circuit_eval = consumer.accumulators()[0];
     let native_eval_t = builder.constant_extension(native_eval);
     builder.connect_extension(circuit_eval, native_eval_t);

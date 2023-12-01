@@ -3,35 +3,27 @@ use alloc::vec::Vec;
 
 use plonky2::field::extension::{Extendable, FieldExtension};
 use plonky2::field::packed::PackedField;
+use plonky2::field::polynomial::PolynomialValues;
+use plonky2::fri::oracle::PolynomialBatch;
 use plonky2::fri::structure::{
     FriBatchInfo, FriBatchInfoTarget, FriInstanceInfo, FriInstanceInfoTarget, FriOracleInfo,
     FriPolynomialInfo,
 };
 use plonky2::hash::hash_types::RichField;
+use plonky2::hash::merkle_tree::MerkleCap;
 use plonky2::iop::ext_target::ExtensionTarget;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
+use plonky2::plonk::config::GenericConfig;
 use plonky2::util::ceil_div_usize;
+use plonky2::util::timing::TimingTree;
 
 use crate::config::StarkConfig;
 use crate::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer};
-use crate::evaluation_frame::StarkEvaluationFrame;
 use crate::permutation::PermutationPair;
+use crate::vars::{StarkEvaluationTargets, StarkEvaluationVars};
 
 /// Represents a STARK system.
 pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
-    /// The total number of columns in the trace.
-    const COLUMNS: usize = Self::EvaluationFrameTarget::COLUMNS;
-    const PUBLIC_INPUTS: usize = Self::EvaluationFrameTarget::PUBLIC_INPUTS;
-
-    /// This is used to evaluate constraints natively.
-    type EvaluationFrame<FE, P, const D2: usize>: StarkEvaluationFrame<P, FE>
-    where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>;
-
-    /// The `Target` version of `Self::EvaluationFrame`, used to evaluate constraints recursively.
-    type EvaluationFrameTarget: StarkEvaluationFrame<ExtensionTarget<D>, ExtensionTarget<D>>;
-
     /// Evaluate constraints at a vector of points.
     ///
     /// The points are elements of a field `FE`, a degree `D2` extension of `F`. This lets us
@@ -40,7 +32,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     /// constraints over `F`.
     fn eval_packed_generic<FE, P, const D2: usize>(
         &self,
-        vars: &Self::EvaluationFrame<FE, P, D2>,
+        vars: StarkEvaluationVars<FE, P>,
         yield_constr: &mut ConstraintConsumer<P>,
     ) where
         FE: FieldExtension<D2, BaseField = F>,
@@ -49,7 +41,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     /// Evaluate constraints at a vector of points from the base field `F`.
     fn eval_packed_base<P: PackedField<Scalar = F>>(
         &self,
-        vars: &Self::EvaluationFrame<F, P, 1>,
+        vars: StarkEvaluationVars<F, P>,
         yield_constr: &mut ConstraintConsumer<P>,
     ) {
         self.eval_packed_generic(vars, yield_constr)
@@ -58,7 +50,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     /// Evaluate constraints at a single point from the degree `D` extension field.
     fn eval_ext(
         &self,
-        vars: &Self::EvaluationFrame<F::Extension, F::Extension, D>,
+        vars: StarkEvaluationVars<F::Extension, F::Extension>,
         yield_constr: &mut ConstraintConsumer<F::Extension>,
     ) {
         self.eval_packed_generic(vars, yield_constr)
@@ -71,7 +63,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     fn eval_ext_circuit(
         &self,
         builder: &mut CircuitBuilder<F, D>,
-        vars: &Self::EvaluationFrameTarget,
+        vars: StarkEvaluationTargets<D>,
         yield_constr: &mut RecursiveConstraintConsumer<F, D>,
     );
 
@@ -96,11 +88,21 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     ) -> FriInstanceInfo<F, D> {
         let mut oracles = vec![];
 
-        let trace_info = FriPolynomialInfo::from_range(oracles.len(), 0..Self::COLUMNS);
+        let trace_info = FriPolynomialInfo::from_range(oracles.len(), 0..config.num_columns);
         oracles.push(FriOracleInfo {
-            num_polys: Self::COLUMNS,
+            num_polys: config.num_columns,
             blinding: false,
         });
+
+        let fixed_values_info = if config.num_fixed_columns > 0 {
+            oracles.push(FriOracleInfo {
+                num_polys: config.num_fixed_columns,
+                blinding: false,
+            });
+            FriPolynomialInfo::from_range(oracles.len() - 1, 0..config.num_fixed_columns)
+        } else {
+            vec![]
+        };
 
         let permutation_zs_info = if self.uses_permutation_args() {
             let num_z_polys = self.num_permutation_batches(config);
@@ -125,6 +127,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
             point: zeta,
             polynomials: [
                 trace_info.clone(),
+                fixed_values_info.clone(),
                 permutation_zs_info.clone(),
                 quotient_info,
             ]
@@ -149,11 +152,21 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
     ) -> FriInstanceInfoTarget<D> {
         let mut oracles = vec![];
 
-        let trace_info = FriPolynomialInfo::from_range(oracles.len(), 0..Self::COLUMNS);
+        let trace_info = FriPolynomialInfo::from_range(oracles.len(), 0..config.num_columns);
         oracles.push(FriOracleInfo {
-            num_polys: Self::COLUMNS,
+            num_polys: config.num_columns,
             blinding: false,
         });
+
+        let fixed_values_info = if config.num_fixed_columns > 0 {
+            oracles.push(FriOracleInfo {
+                num_polys: config.num_fixed_columns,
+                blinding: false,
+            });
+            FriPolynomialInfo::from_range(oracles.len() - 1, 0..config.num_fixed_columns)
+        } else {
+            vec![]
+        };
 
         let permutation_zs_info = if self.uses_permutation_args() {
             let num_z_polys = self.num_permutation_batches(config);
@@ -178,6 +191,7 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
             point: zeta,
             polynomials: [
                 trace_info.clone(),
+                fixed_values_info.clone(),
                 permutation_zs_info.clone(),
                 quotient_info,
             ]
@@ -221,5 +235,29 @@ pub trait Stark<F: RichField + Extendable<D>, const D: usize>: Sync {
             self.num_permutation_instances(config),
             self.permutation_batch_size(),
         )
+    }
+
+    fn fixed_values(&self) -> Vec<PolynomialValues<F>>;
+
+    fn get_fixed_values_commitment<C: GenericConfig<D, F = F>>(
+        &self,
+        config: &StarkConfig,
+    ) -> Option<MerkleCap<F, C::Hasher>> {
+        if config.num_fixed_columns == 0 {
+            return None;
+        } else {
+            let rate_bits = config.fri_config.rate_bits;
+            let cap_height = config.fri_config.cap_height;
+            let mut timing = TimingTree::default();
+            let fixed_values_commitment = PolynomialBatch::<F, C, D>::from_values(
+                self.fixed_values(),
+                rate_bits,
+                false,
+                cap_height,
+                &mut timing,
+                None,
+            );
+            Some(fixed_values_commitment.merkle_tree.cap)
+        }
     }
 }

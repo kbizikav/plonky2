@@ -10,11 +10,12 @@ use crate::permutation::{
     PermutationCheckVars,
 };
 use crate::stark::Stark;
+use crate::vars::{StarkEvaluationTargets, StarkEvaluationVars};
 
 pub(crate) fn eval_vanishing_poly<F, FE, P, S, const D: usize, const D2: usize>(
     stark: &S,
     config: &StarkConfig,
-    vars: &S::EvaluationFrame<FE, P, D2>,
+    vars: StarkEvaluationVars<FE, P>,
     permutation_data: Option<PermutationCheckVars<F, FE, P, D2>>,
     consumer: &mut ConstraintConsumer<P>,
 ) where
@@ -39,7 +40,7 @@ pub(crate) fn eval_vanishing_poly_circuit<F, S, const D: usize>(
     builder: &mut CircuitBuilder<F, D>,
     stark: &S,
     config: &StarkConfig,
-    vars: &S::EvaluationFrameTarget,
+    vars: StarkEvaluationTargets<D>,
     permutation_data: Option<PermutationCheckDataTarget<D>>,
     consumer: &mut RecursiveConstraintConsumer<F, D>,
 ) where
