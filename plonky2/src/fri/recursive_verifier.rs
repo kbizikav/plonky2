@@ -57,7 +57,7 @@ impl<F: RichField + Extendable<D>, const D: usize> CircuitBuilder<F, D> {
         } else {
             // Only 2-arity interpolation is supported.
             assert_eq!(arity, 2);
-            let mut points = vec![];
+            let mut points = Vec::new();
             points.push((self.convert_to_ext(coset_start), evals[0]));
             let coset_end = self.mul_const(g, coset_start);
             points.push((self.convert_to_ext(coset_end), evals[1]));

@@ -661,7 +661,6 @@ pub trait Read {
         let max_quotient_degree_factor = self.read_usize()?;
         let use_base_arithmetic_gate = self.read_bool()?;
         let use_interpolation_gate = self.read_bool()?;
-        let use_interpolation = self.read_bool()?;
         let zero_knowledge = self.read_bool()?;
         let fri_config = self.read_fri_config()?;
 
