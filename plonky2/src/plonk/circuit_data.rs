@@ -46,6 +46,7 @@ pub struct CircuitConfig {
     /// Whether to use a dedicated gate for base field arithmetic, rather than using a single gate
     /// for both base field and extension field arithmetic.
     pub use_base_arithmetic_gate: bool,
+    pub use_interpolation_gate: bool,
     pub security_bits: usize,
     /// The number of challenge points to generate, for IOPs that have soundness errors of (roughly)
     /// `degree / |F|`.
@@ -75,6 +76,7 @@ impl CircuitConfig {
             num_routed_wires: 80,
             num_constants: 2,
             use_base_arithmetic_gate: true,
+            use_interpolation_gate: true,
             security_bits: 100,
             num_challenges: 2,
             zero_knowledge: false,
@@ -86,6 +88,26 @@ impl CircuitConfig {
                 reduction_strategy: FriReductionStrategy::ConstantArityBits(4, 5),
                 num_query_rounds: 28,
             },
+        }
+    }
+
+    pub fn standard_inner_stark_verifier_config() -> Self {
+        Self {
+            fri_config: FriConfig {
+                rate_bits: 3,
+                cap_height: 4,
+                proof_of_work_bits: 16,
+                reduction_strategy: FriReductionStrategy::ConstantArityBits(1, 5),
+                num_query_rounds: 28,
+            },
+            ..Self::standard_recursion_config()
+        }
+    }
+
+    pub fn standard_stark_verifier_config() -> Self {
+        Self {
+            use_interpolation_gate: false,
+            ..Self::standard_inner_stark_verifier_config()
         }
     }
 
